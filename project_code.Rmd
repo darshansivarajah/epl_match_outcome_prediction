@@ -1,0 +1,410 @@
+---
+title: "Non-470 Project Revision"
+author: 'Darshan Sivarajah'
+date: '`r format(Sys.time(), "%B %d, %Y")`'
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document:
+    df_print: kable
+header-includes:
+  - \usepackage{float}
+  - \usepackage{placeins}
+---
+
+```{r Front Matter, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 5
+)
+
+# clean up & set default chunk options
+rm(list = ls())
+knitr::opts_chunk$set(echo = FALSE)
+
+# packages
+rm(list = ls())
+library(tidyverse)
+library(leaps)
+library(corrplot)
+library(car)
+library(kableExtra)
+library(lme4)
+library(gridExtra)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(pROC)
+library(rpart)
+library(randomForest)
+library(ggcorrplot)
+library(stringr)
+
+premleague <- read.csv("df_full_premierleague.csv") %>%
+  mutate(homew = ifelse(goal_home_ft > goal_away_ft, 1, 0)) %>%
+  dplyr::select(season, home_team, away_team, homew, goal_away_ht, goal_away_ft,
+         home_possession, home_passes, home_corners, home_tackles,
+         home_fouls_conceded, home_shots, home_shots_on_target, home_red_cards, home_yellow_cards,
+         away_possession, away_passes, away_corners, away_tackles,
+         away_fouls_conceded, away_shots, away_shots_on_target, away_red_cards, away_yellow_cards,
+         performance_acum_home, performance_acum_away)
+
+premleague <-premleague %>%
+  na.omit()
+
+# train/test split
+set.seed(123)
+trainInd <- sample(1:nrow(premleague), floor(0.8 * nrow(premleague))) 
+set.seed(NULL)
+
+Train <- premleague[trainInd, ]
+Validation <- premleague[-trainInd, ]
+
+```
+
+# Introduction
+
+In this project, we aimed to develop a model capable of predicting if an English Premier League (EPL) soccer team wins a match based on anticipated match statistics. With data analysis becoming an increasingly popular department within soccer teams, and their insights having a direct impact on practice drills and game strategy, we were inspired to observe if match statistics closely impacted its outcome. This endeavor was strictly out of our own interests, but such a tool can be applied to sports betting to forecast outcomes, and thus inform betting choices. 
+
+To address the questions, we reduced the variables in our data to those most relevant to match outcomes, and removed records with missing values. We also put 20% of the data aside for testing purposes. 
+
+
+## Research Questions
+
+As we worked towards obtaining an effective model, we had two questions that we wanted to answer: 
+
+**Question 1:** What soccer match statistics contribute the most to whether a team wins or not 
+
+**Question 2:** Can we predict if a team from the 2016/17 season would win or not depending on their possession and shots on target?
+
+
+## Variables
+
+The dataset used is titled “All Premier League Matches 2010-2021” and was found on Kaggle. The original dataset was sourced from the league’s official statistics provider, Opta Sports, and collected by web scraping the official Premier League website. This dataset contains statistics across 10 seasons, covering 4070 matches with 109 features. To support our analysis, we created a categorical variable homew, coded as 1 if the home team won or 0 if the home team did not win. We manually narrowed down the 109 features to just 26. 
+
+```{r}
+#create table of variables
+tab01 <- data.frame(
+  no = 1:16,
+   var = c("season", "home_team", "away_team", "homew", "goal_away_ht", "goal_away_ft",
+         "home_possession & away_possession", "home_passes & away_passes", "home_corners & away_corners", 'home_tackles & away_tackles',
+         "home_fouls_conceded & away_fouls_conceded", "home_shots & away_shots", "home_shots_on_target & away_shots_on_target", "home_red_cards & away_red_cards", 
+         "home_yellow_cards & away_yellow_cards", "performance_acum_home & performance_acum_away"),
+  type = c(rep("string", 3), rep("int", 3), "float", rep("int", 8), "float"),
+  desc = c(
+    "Annual cycle of competition that the match occurred in",
+    "Team playing in their own stadium",
+    "Team playing at the opponent's stadium",
+    "Indicates if the home team won (1 = yes, 0 = no)",
+    "Number of goals the away team has scored at half time",
+    "Number of goals the away team has scored in the whole game",
+    "Percentage of possession of the ball the home & away teams had in the match respectively",
+    "Number of passes the home & away teams made respectively",
+    "Number of corners the home & away teams took respectively)",
+    "Number of tackles that the home & away teams made respectively",
+    "Number of fouls the home and away teams committed respectively",
+    "Total number of shots the home and away teams took respectively",
+    "Number of shots the home and away teams made that would go into the goal if not stopped respectively",
+    "Number of red cards obtained by the home and away teams respecitvely",
+    "Number of yellow cards obtained by the home and away teams respecitvely",
+    "Winning percentage of the home and away teams respectively, before the match"
+  )
+)
+
+kable(
+  format = "latex",
+  tab01,
+  booktabs = TRUE,
+  col.names = c("No.", "Variable Name", "Type", "Description"),
+  align = c("l", "l", "l"),
+  caption = "Description of Variables") %>% 
+  kable_styling(latex_options = c("scale_down", "hold_position"), position = "center")
+
+```
+
+\FloatBarrier
+
+# Exploratory Data Analysis (EDA)
+
+Figure 1 shows every team that recorded at least one home win from the 2010/11 Premier League season to the 2020/21 season as well as each team's total home wins during that time. These win totals give an indication of how difficult a team would be to win against. This would also relate to the accumulated performance statistic (performance_accum_home) used in the GLM model. In the Premier League, there is a group of teams known as “The Big Six” and those six teams are evident in Figure 1 as the six teams with the most home wins over the time frame.  
+
+```{r fig.width=5, fig.height=4}
+home_winners <- premleague %>%
+  filter(homew == 1)
+
+ggplot(home_winners, aes(x = home_team))  +
+  geom_bar(fill = "lightblue", color = "black")+
+  labs(title = "Number of Home Wins for Premier League Teams Between the 2010/11 and 2020/21 Seasons", x = "Home Team", y = "Games Won", caption = "Figure 1") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+It'd be interesting to see how features such as possession and shots impact the matches outcome. Looking at Figure 2, we can see that there is a lot of overlap between the curves for different match outcomes, implying that possession is not a great indicator. Figure 3 displays similar findings about the relationship between shots and match outcomes. There is a lot of overlap between the boxplot interquartile ranges, so we'd need to dive deeper to understand if there is a significant relationship there.  
+
+```{r fig.width=5, fig.height=4}
+premleague2 <- premleague
+premleague2$homew <- as.factor(premleague2$homew)
+
+group_by_homew <- premleague2 %>%
+  group_by(homew)
+
+ggplot(premleague2, aes(x = home_possession, fill = homew)) +
+  geom_density(alpha = 0.4) +
+  labs(title = "Distribution of Possession by Outcome", x = "Possession (%)", y = "Density", caption = "Figure 2") +
+  theme_minimal()
+
+ggplot(premleague2, aes(x = homew, y = home_shots, fill = homew)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(title = "Shots by Match Outcome", x = "Outcome", y = "Number of Shots", caption = "Figure 3") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+
+# Statistical Analysis 
+
+## Generalized Linear Model (GLM)
+
+Given that our response variable is binary, we decided that a generalized linear model seemed to be the most appropriate choice. Since we still had many variables to work with, we used a conservative variable selection method called bi-directional step-wise variable selection (using BIC as the criterion) to create a simpler model. This produced a model containing 15 predictor variables related to offensive production, discipline, and team performance, such as away goals, home shots, shots on target, corners, possession, away team’s red card count, and accumulated team performance. These variables reflect both immediate match conditions and underlying team strength. 
+
+```{r}
+# insert model
+homew_model_bidirectional <- glm(formula = homew ~ goal_away_ft + home_shots_on_target + home_shots + 
+    home_corners + performance_acum_away + away_possession + 
+    home_passes + away_passes + away_red_cards + away_team + 
+    home_red_cards + season + home_team + goal_away_ht + home_fouls_conceded, 
+    family = "binomial", data = Train)
+```
+
+
+### Correlation
+
+```{r Data Cleaning, fig.width=5, fig.height=4}
+modelvar <- premleague %>% 
+  dplyr::select(homew, goal_away_ft  , home_shots_on_target, home_shots , 
+    home_corners , performance_acum_away , away_possession , 
+    home_passes , away_passes , away_red_cards , away_team , 
+    home_red_cards , season , home_team , goal_away_ht , home_fouls_conceded)
+
+nummodelvar <- modelvar %>% 
+  dplyr::select(-away_team, -season, -home_team)
+
+ggcorrplot(cor(nummodelvar)) +
+  labs(title = "Correlation Between Features in Our GLM", label = "Figure 4")
+```
+ 
+Our first order of action was to check for correlation between the explanatory variables. Away_passes was strongly correlated to away_possession, which is not surprising because when a team has control over the ball for a longer amount of time, they are expected to make more passes. Another set of correlated variables was goal_away_ht and goal_away_ft. The number of goals at full time is equal to or greater than the number of goals at half-time, which is logical. Another set of correlated variables was home_shots and home_shots_on_target. This is intuitive, as all shots on target are also counted as shots. Correlation can be viewed in Figure 4. 
+
+We also checked multicollinearity between variables using VIF (variance inflation factor) scores. This metric measures the correlation between the independent variables. Identifying a high correlation means that it's difficult to distinguish the individual effects of each feature on the outcome. We observed that multicollinearity was present in away_possession, home_passes, away_passes, away_team, and home_team. To account for this, we removed those variables from the model, except for away_possession. Once the other variables were removed, away_possession was no longer a concern after checking the VIF scores once more.  
+
+
+### Model Assumptions
+
+We then checked our model assumptions. We plotted a scatterplot matrix; there was no reason to believe that the linearity assumption was being violated. This is further reinforced by plots that we have included in our technical appendix (graphs 1 - 3).
+
+```{r}
+modelnomcol <- glm(formula = homew ~ goal_away_ft + home_shots_on_target + home_shots + 
+    home_corners + performance_acum_away + away_possession + away_red_cards + 
+    home_red_cards + season + goal_away_ht + home_fouls_conceded, 
+    family = "binomial", data = Train)
+
+modelvarnomcol <- premleague %>% 
+  dplyr::select(homew, goal_away_ft  , home_shots_on_target, home_shots , 
+    home_corners , performance_acum_away , away_possession, away_red_cards , 
+    home_red_cards, goal_away_ht , home_fouls_conceded)
+
+Train_clean <- Train %>%
+  mutate(logodds = modelnomcol$linear.predictors)
+```
+
+Ultimately, we reached the conclusion that all assumptions of a generalized linear model were satisfied:
+
+- The response is binary.
+
+- The observations are all independent of one another.
+
+- There is no multicollinearity.
+
+- There are no extreme outliers.
+
+- The sample size is large. 
+
+- The relationship between the log of the odds ratio and each predictor variable is linear. 
+
+
+### Model Analysis
+
+After we concluded that our model satisfied all the necessary assumptions of a GLM, we then had to analyze our model. All of the variables in the model were significant at a 5% significance level, except for the seasons and goal_away_ht. We then used the model and the test dataset to create predictions. We decided that we should classify a home team as a winner if the probability is greater than 0.490 (based on an ROC curve, pictured in Graph 4, found in the appendix). When testing the model on the unseen data, we can observe an accuracy is 79.92%. 
+
+We then created another model to compare to our main model. It was made by applying bi-directional selection on just the variables pertaining to the home team. This model (presented in Figure 6) performed worse than our chosen model, which could be gleamed by comparing BIC scores. Our main model proved to be better than a model with just home team statistics, so we used our original model as our final GLM model. 
+
+```{r}
+premleagueHome <- premleague %>%
+  select(season, home_team, homew, home_possession, home_passes, home_corners, home_tackles, home_fouls_conceded, 
+         home_shots, home_shots_on_target, home_red_cards, home_yellow_cards)
+TrainB <- premleagueHome[trainInd, ]
+
+modelHome <- glm(formula = homew ~ home_shots_on_target + home_shots + home_yellow_cards + home_red_cards + home_passes + home_possession, 
+    family = "binomial", data = TrainB)
+
+
+#print(summary(modelHome)$coefficients)
+```
+
+\begin{align*}
+homew &= -1.25+0.435 x_{home\_shots\_on\_target}-0.053 x_{home\_shots}-0.135 x_{home\_yellow\_cards} \\
+    &\quad -0.704 x_{home\_red\_cards}+0.004 x_{home\_passes}-0.033 x_{home\_possession}
+\end{align*}
+
+$\text{Figure 5}$
+
+
+## Multi-level Model
+
+To answer our second research question, whether we could predict if a home team wins or not in the 2016/17 season, depending on their possession and shots on target, we created a multi-level model. Once again, our response is binary: 1 if the home team wins and 0 if the home team does not (win or lose).  
+
+After filtering our data set to only keep matches in the 2016/17 season, we have 370 remaining observations. Individual match statistics are our level 1 observational units, and our level 2 observational units are the individual home teams, since each team is of a different quality. The level 1 covariates are home_possession and home_shots_on_target. The level 2 covariate is performance_acum_home, which represents the percentage of points earned in games this season hosted by the home team. The fixed effect is the 2016/17 season. The random effect would be each team’s different baseline performance. Each team has different strategies and different quality of players, which warrants each team having different intercepts and gradients for their possession.  
+
+Returning to the level 1 covariates, we felt as though home_red_cards could be a useful predictor to add. This changes the research question slightly, but upon further consideration, the occurrence of a red card could be a devastating blow to the home team. To test this, we did a hypothesis test. The null hypothesis was that home_red_cards was insignificant, and the alternative hypothesis was that it was significant. We created a nested model and performed a drop-in deviance test, which told us that the feature was significant and should be added to our main model. The new model is as follows: 
+
+```{r}
+filtered_prem <- premleague %>%
+  filter(season == "16/17") 
+
+home_winners <- filtered_prem %>%
+  filter(homew == 1)
+
+multilevel_model1 <- glmer(homew ~ home_possession + home_shots_on_target + performance_acum_home + (1 + home_possession | home_team),
+                           data = Train, family = binomial(link = "logit"))
+
+#summary(multilevel_model1)$coefficients
+#cat("\nFigure 7")
+```
+
+\begin{align*}
+homew &= -1.388-0.022 x_{home\_posession}+0.358 x_{home\_shots\_on\_target}+0.010 x_{performance\_acum\_home}
+\end{align*}
+
+$\text{Figure 6}$
+
+
+### Univariate and Bivariate Relationships
+
+Since we explored a lot of the variables and their correlations in part one, we will explore the univariate and bivariate relationships between home_team, performance_acum_home, home_possession, and home_shots_on_target. From the univariate graphs we created (reference graph 5 in the appendix), there is a clear indicator that the better teams are more likely to have higher rates of home possession, home shots on target,  and performance accumulation at home. This is expected to come from the higher-ranked teams in the league. The bivariate variables (graph 6 in the appendix) also gave us more insight into how they influence one another.  As expected, Tottenham Hotspur had the highest median shots on target per game over any other team. Surprisingly, Liverpool has the second-highest median shots on target despite being ranked in fifth place. We also calculated how many home games each team played, how many home games each team won, and the winning percentage for each team. These were the top five results: 
+
+\begin{center}
+\textbf{Top Teams by Home Win Percentage}
+\end{center}
+```{r}
+home_games <- filtered_prem %>%
+  group_by(home_team) %>%
+  summarise(total_home_games = n())
+
+home_wins <- filtered_prem %>%
+  filter(homew == 1) %>%
+  group_by(home_team) %>%
+  summarise(home_wins = n())
+
+left_join(home_games, home_wins, by = "home_team") %>%
+  replace_na(list(home_wins = 0)) %>%
+  mutate(win_percent = (home_wins / total_home_games) * 100) %>%
+  arrange(desc(win_percent)) %>%
+  head(5) %>%
+  knitr::kable(caption = NULL) %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+```
+$\text{Figure 7}$
+
+We put together a graph (Figure 8) that measured each team's home possession in minutes and home shots on target. For most of the teams, there is a positive relationship between home possession and shots on target. This would indicate they have control of the ball for longer periods and take more shots, leading to a higher chance of winning.  
+
+```{r}
+ggplot(filtered_prem, aes(x = home_possession, y = home_shots_on_target, color = home_team)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = F) +
+  labs(title = "Home Team's Possesion vs Home Team's Shots on Target", x = "Home Possession (mins)", y = "Home Shots on Target", caption = "Figure 8") +
+  facet_wrap(~home_team) +
+  theme_bw()
+```
+
+We also built a random forest model to test our model accuracy and variable importance. The model highlighted performance_acum_home, home possession, and home_shots_on_target as the most important variables. These are the variables we chose at the very beginning when choosing to make our multilevel model.  
+
+### Accuracy
+
+We used it on our test set to test the accuracy of this model. We visualize these results in a confusion matrix. We then calculate the accuracy to be 66.03%. This is not a fantastic result, since we get 1 in every 3 predictions incorrect. However, it is better than predicting the same outcome for all cases. If we predicted that the team would win in every home match of the 2016/17 season, we would get 46.13%. If we predicted that the team did not win all home matches in that season, we would get 53.87% accuracy.  
+
+
+# Conclusion
+
+To answer our first research question: the statistics that contribute the most to whether a team wins or not are away goals at full time, home shots on target, home shots, home corners, and the accumulated performance of the away team. To consolidate this into two braoder factors: the home team's attacking chances and the away team's results (leading up to the game and their goals during the game). The accuracy of our model in predicting whether the home team won a match or not is 79.92%. Scores for AIC, BIC and ROC Area Under the Curve also support this. That being said, our analysis could possibly be improved if our variables had more specificity. For example, considering shots taken, it would be interesting if we had access to how far from the goal that shot was taken, the angle of the shot, and even the type of shot (volley, header, free kick, penalty, etc.). This would require a different type of model, but it may help give more insight.  
+
+To answer our second research question, we can predict if a home team from the 2016/17 season would win or not, depending on their possession, shots on target, and number of red cards earned by the team. The latter variable was added to the model after carrying out a hypothesis test and deeming it significant. Our resulting model had an accuracy rate of 66.03% when tested on unseen data. We believe that the model can be improved if more variables were added to it. Our question only concerned a select number of parameters, but adding more would likely improve predictability.
+
+
+# Technical Appendix  
+
+```{r, fig.width=5, fig.height=4}
+
+#qq plot -> graph1
+plot(homew_model_bidirectional, pch=16,2)
+title(main = "Q-Q Residuals")
+mtext("Graph 1", side = 3, line = 2, adj = 0)
+
+#cook's distance -> graph2
+plot(cooks.distance(homew_model_bidirectional), ylab="Cook's Distance", pch=16)
+abline(h=1,col="red",lty=2)
+title(main = "Cook's Distance for GLM")
+mtext("Graph 2", side = 3, line = 2, adj = 0)
+
+#logodds vs predictors -> graph3
+Train_clean %>%
+  select(logodds, goal_away_ft, home_shots_on_target, home_shots, home_corners,
+         performance_acum_away, away_possession, away_red_cards, home_red_cards,
+         goal_away_ht, home_fouls_conceded) %>%
+  pivot_longer(cols = -logodds, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = value, y = logodds)) +
+  geom_point(alpha = 0.6, shape = 16) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  facet_wrap(~ variable, scales = "free_x", nrow = 2, ncol = 5) +
+  theme_minimal() +
+  labs(x = "Predictor Value", y = "Log Odds", title = "Log Odds vs Predictors", caption = "Graph 3")
+```
+
+
+```{r, fig.width=5, fig.height=4}
+#ROC curve, also print the best threshold with the highest sum sensitivity + specificity -> graph4
+pred_prob <- predict(modelnomcol, newdata = Validation, type = "response")
+plot(roc(response = Validation$homew, predictor = pred_prob, levels = 0:1, direction = '<'), print.auc = T, print.thres = T)
+title(main = "ROC Curve for GLM")
+mtext("Graph 4", side = 3, line = 2, adj = 0)
+```
+
+```{r, fig.width=5, fig.height=4}
+#univariate -> graph5
+ggplot(filtered_prem, aes(x = home_shots_on_target, y = home_team)) +
+  geom_boxplot() +
+  labs(title = "Univariate Relationship Between Home Team and Home Shots on Target", x = "home shots on target", y = "home games played", caption = "Graph 5") +
+  theme()
+```
+
+```{r, fig.width=5, fig.height=4}
+#bivariate -> graph6
+ggplot(data = filtered_prem, mapping = aes(y = home_team, x = home_possession)) +
+  geom_boxplot() +
+  labs(title = str_wrap("Bivariate Relationship Between Home Team and Home Possession"), x = "home possession in mins", y = "team", caption = "Graph 6")
+
+
+ggplot(data = filtered_prem, mapping = aes(y = home_team, x = home_shots_on_target)) +
+  geom_boxplot() +
+  labs(title = str_wrap("Bivariate Relationship Between Home Team and Home Shots on Target"), x = "home shots on target", y = "team", caption = "Graph 7")
+
+
+```
+
+
